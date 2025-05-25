@@ -75,7 +75,6 @@ async function getCaptionTracks(videoID) {
   });
   const page = await context.newPage();
 
-  // Random small delay to mimic human
   await page.waitForTimeout(500 + Math.random() * 1000);
   await page.goto(`https://www.youtube.com/watch?v=${videoID}`, { waitUntil: 'networkidle' });
 
@@ -105,7 +104,6 @@ async function takeScreenshot(videoID, lang) {
   });
   const page = await context.newPage();
 
-  // Random small delay to mimic human
   await page.waitForTimeout(500 + Math.random() * 1000);
   await page.goto(`https://www.youtube.com/watch?v=${videoID}`, { waitUntil: 'networkidle' });
   await page.click('button.ytp-large-play-button').catch(() => {});
@@ -120,10 +118,15 @@ async function takeScreenshot(videoID, lang) {
   return shotPath;
 }
 
+/**
+ * /captions endpoint: tries each available track URL until it finds non-empty captions
+ * Supports `nocache=true` to bypass both cache reads and writes.
+ */
 app.get('/captions', async (req, res) => {
-  const videoID  = req.query.video;
-  const lang     = req.query.lang || 'en';
-  const wantShot = req.query.screenshot === 'true';
+  const videoID   = req.query.video;
+  const lang      = req.query.lang || 'en';
+  const wantShot  = req.query.screenshot === 'true';
+  const noCache   = req.query.nocache === 'true';
 
   if (!videoID) {
     logger.warn('`video` query parameter missing');
@@ -131,43 +134,59 @@ app.get('/captions', async (req, res) => {
   }
 
   const cacheKey = `${videoID}_${lang}`;
-  const cached = captionCache.get(cacheKey);
-  if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-    logger.info(`Cache hit for ${cacheKey}`);
-    return res.json(cached.data);
+  if (!noCache) {
+    const cached = captionCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+      logger.info(`Cache hit for ${cacheKey}`);
+      return res.json(cached.data);
+    }
   }
 
   try {
-    // 1. Scrape tracks
     const tracks = await getCaptionTracks(videoID);
     let captions = [];
+    let successfulTrack = null;
 
-    if (tracks.length > 0) {
-      const track = tracks.find(t => t.languageCode === lang)
-                  || tracks.find(t => t.languageCode.startsWith(lang))
-                  || tracks[0];
+    for (let t of tracks) {
+      // Only consider tracks matching the requested language
+      if (t.languageCode !== lang && !t.languageCode.startsWith(lang)) continue;
 
-      logger.info(`Fetching captions from ${track.baseUrl}`);
-      const xmlResp = await axios.get(track.baseUrl, {
-        timeout: 10000,
-        headers: { 'User-Agent': USER_AGENT }
-      });
-      captions = parseXmlTranscript(xmlResp.data);
-      logger.info(`Parsed ${captions.length} caption lines`);
-    } else {
-      logger.warn('No captionTracks found on page');
+      const url = t.baseUrl;
+      logger.info(`Trying captions URL: ${url}`);
+      try {
+        const resp = await axios.get(url, {
+          timeout: 10000,
+          headers: { 'User-Agent': USER_AGENT }
+        });
+
+        const parsed = parseXmlTranscript(resp.data);
+        if (parsed.length > 0) {
+          captions = parsed;
+          successfulTrack = t;
+          logger.info(`✔️ Picked ${url} with ${parsed.length} lines`);
+          break;
+        } else {
+          logger.info(`– Empty transcript from ${url}, skipping`);
+        }
+      } catch (err) {
+        logger.warn(`– Error fetching ${url}: ${err.message}`);
+      }
     }
 
-    const result = { video: videoID, lang, captions };
-    captionCache.set(cacheKey, { timestamp: Date.now(), data: result });
+    if (!successfulTrack) logger.warn('No captionTracks produced any data');
 
-    // 4. Optional screenshot
+    const result = { video: videoID, lang, captions };
     if (wantShot) {
       try {
         result.screenshot = await takeScreenshot(videoID, lang);
       } catch (shotErr) {
         logger.error(`Screenshot error: ${shotErr.message}`);
       }
+    }
+
+    // only cache if caching is allowed
+    if (!noCache) {
+      captionCache.set(cacheKey, { timestamp: Date.now(), data: result });
     }
 
     res.json(result);
