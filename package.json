@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "echo \"Building the project...\" && exit 0"
+    "build": "echo \"Building the project...\" && exit 0",
+    "postinstall": "npx playwright install --with-deps"git 
   },
   "keywords": [],
   "author": "",
@@ -22,5 +23,9 @@
     "winston": "^3.17.0",
     "xml2js": "^0.6.2",
     "ytdl-core": "^4.11.5"
+  },
+  "engines": {
+    "node": "18.x",
+    "npm": "9.x"
   }
 }
